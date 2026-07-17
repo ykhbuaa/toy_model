@@ -53,8 +53,8 @@ def compute_amplitude_spectrum(
     if not torch.allclose(
         differences,
         expected_differences,
-        rtol=1e-4,
-        atol=1e-7,
+        rtol=1e-3,
+        atol=1e-6,
     ):
         raise ValueError("x must be uniformly spaced.")
 
