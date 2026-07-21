@@ -96,3 +96,71 @@ def sample_function(
         y = y + noise_std * noise
 
     return x, y
+
+def sample_function_grid(
+    function_name: str,
+    num_samples: int,
+    x_min: float = -math.pi,
+    x_max: float = math.pi,
+    noise_std: float = 0.0,
+    seed: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sample a function on an evenly spaced one-dimensional grid.
+
+    Unlike ``sample_function``, this function uses ``torch.linspace``.
+    It is therefore suitable for experiments that explicitly compare
+    sampling density.
+
+    Args:
+        function_name:
+            Name passed to ``evaluate_function``.
+        num_samples:
+            Number of grid points, including both interval endpoints.
+        x_min:
+            Lower endpoint.
+        x_max:
+            Upper endpoint.
+        noise_std:
+            Standard deviation of optional Gaussian label noise.
+        seed:
+            Optional seed for label noise.
+
+    Returns:
+        A tuple ``(x, y)`` with shape [num_samples, 1].
+    """
+    if num_samples < 2:
+        raise ValueError("num_samples must be at least two.")
+
+    if x_min >= x_max:
+        raise ValueError("x_min must be smaller than x_max.")
+
+    if noise_std < 0:
+        raise ValueError("noise_std cannot be negative.")
+
+    x = torch.linspace(
+        x_min,
+        x_max,
+        num_samples,
+    ).unsqueeze(1)
+
+    y = evaluate_function(
+        x=x,
+        function_name=function_name,
+    )
+
+    if noise_std > 0:
+        if seed is None:
+            noise = torch.randn_like(y)
+        else:
+            generator = torch.Generator()
+            generator.manual_seed(seed)
+
+            noise = torch.randn(
+                y.shape,
+                generator=generator,
+                dtype=y.dtype,
+            )
+
+        y = y + noise_std * noise
+
+    return x, y
