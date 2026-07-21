@@ -1,5 +1,12 @@
 """Model evaluation utilities."""
 
+from toy_model.evaluation.classification import (
+    ClassificationMetrics,
+    compute_confusion_matrix,
+    compute_logit_margins,
+    evaluate_classification,
+    evaluate_classification_logits,
+)
 from toy_model.evaluation.regression import (
     FunctionRegressionMetrics,
     evaluate_function_regression,
@@ -31,4 +38,9 @@ __all__ = [
     "compute_symmetry_metrics",
     "compute_tail_affine_metrics",
     "fit_affine_function",
+    "ClassificationMetrics",
+    "compute_confusion_matrix",
+    "compute_logit_margins",
+    "evaluate_classification",
+    "evaluate_classification_logits",
 ]

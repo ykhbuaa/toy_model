@@ -1,5 +1,12 @@
 """Training utilities."""
 
+from toy_model.training.classification import (
+    ClassificationTrainConfig,
+    ClassificationTrainResult,
+    fit_classification,
+    predict_labels,
+    predict_logits,
+)
 from toy_model.training.regression import (
     RegressionTrainConfig,
     RegressionTrainResult,
@@ -16,4 +23,9 @@ __all__ = [
     "fit_regression",
     "predict",
     "resolve_device",
+    "ClassificationTrainConfig",
+    "ClassificationTrainResult",
+    "fit_classification",
+    "predict_labels",
+    "predict_logits",
 ]
