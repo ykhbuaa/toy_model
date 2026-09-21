@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import statistics
+import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -15,8 +16,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from toy_model.data import sample_spiral
+from toy_model.diagnostics import gradient_norms, parameter_norms
 from toy_model.evaluation import evaluate_classification
 from toy_model.models import MLP
 from toy_model.training import (
@@ -25,9 +28,16 @@ from toy_model.training import (
 )
 
 from spiral_experiment_utils import (
+    collect_layer_diagnostics,
+    compute_boundary_complexity,
+    compute_input_gradient_norms,
     create_run_directory,
+    make_classification_grid,
     plot_decision_boundary,
+    plot_input_gradient_norm,
+    plot_layer_pca,
     plot_logit_margin,
+    predict_logits_in_batches,
     save_json,
     save_rows_csv,
     serialize_namespace,
@@ -42,6 +52,21 @@ class ModelCondition:
     name: str
     hidden_dims: tuple[int, ...] | None
     description: str
+
+
+def current_git_commit() -> str | None:
+    """Return the current commit when this checkout has git metadata."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return result.stdout.strip() or None
 
 
 def build_model_conditions() -> list[ModelCondition]:
@@ -203,6 +228,8 @@ def aggregate_metrics(
         "test_cross_entropy",
         "test_accuracy",
         "test_mean_true_class_margin",
+        "boundary_complexity",
+        "mean_input_gradient_norm",
     ]
     summaries: list[dict[str, object]] = []
 
@@ -348,6 +375,19 @@ def main() -> None:
     predictions_directory.mkdir()
 
     model_conditions = build_model_conditions()
+    git_commit = current_git_commit()
+    save_json(
+        {
+            "experiment": "spiral_depth_comparison",
+            "arguments": serialize_namespace(args),
+            "git_commit": git_commit,
+            "model_conditions": [
+                asdict(condition)
+                for condition in model_conditions
+            ],
+        },
+        run_directory / "config.json",
+    )
     metric_rows: list[dict[str, object]] = []
     history_rows: list[dict[str, object]] = []
 
@@ -424,6 +464,48 @@ def main() -> None:
                 )
             )
 
+            # These diagnostics use the same held-out test set as the
+            # existing boundary and margin plots. The grid is only a
+            # visualization probe; it does not affect optimization.
+            activation_rows, pca_rows = collect_layer_diagnostics(
+                model=model,
+                x=x_test,
+                targets=y_test,
+            )
+            grid, grid_x_1, grid_x_2 = make_classification_grid(
+                grid_limit=args.grid_limit,
+                grid_points=args.grid_points,
+            )
+            grid_gradient_norms, _ = compute_input_gradient_norms(
+                model=model,
+                x=grid,
+            )
+            grid_logits = predict_logits_in_batches(
+                model=model,
+                x=grid,
+            )
+            boundary_complexity = compute_boundary_complexity(
+                grid_logits.argmax(dim=1),
+                grid_points=args.grid_points,
+            )
+            parameter_norm_values = parameter_norms(model)
+            model.zero_grad(set_to_none=True)
+            try:
+                device = next(model.parameters()).device
+            except StopIteration:
+                device = torch.device("cpu")
+            final_logits = model(x_train.to(device))
+            final_loss = F.cross_entropy(
+                final_logits,
+                y_train.to(device),
+            )
+            final_loss.backward()
+            gradient_norm_values = gradient_norms(model)
+            model.zero_grad(set_to_none=True)
+            mean_input_gradient_norm = float(
+                grid_gradient_norms.mean().item()
+            )
+
             row: dict[str, object] = {
                 "model_name": condition.name,
                 "seed": seed,
@@ -440,6 +522,8 @@ def main() -> None:
                 **test_metrics.to_dict(
                     prefix="test_"
                 ),
+                "boundary_complexity": boundary_complexity,
+                "mean_input_gradient_norm": mean_input_gradient_norm,
             }
             metric_rows.append(row)
 
@@ -490,8 +574,60 @@ def main() -> None:
                     "test_confusion_matrix": (
                         test_confusion.tolist()
                     ),
+                    "activation_stats": activation_rows,
+                    "pca_metrics": [
+                        {
+                            key: value
+                            for key, value in pca_row.items()
+                            if key not in {"projection", "targets"}
+                        }
+                        for pca_row in pca_rows
+                    ],
+                    "parameter_norms": parameter_norm_values,
+                    "gradient_norms": gradient_norm_values,
                 },
                 model_directory / "metrics.json",
+            )
+            if activation_rows:
+                save_rows_csv(
+                    rows=activation_rows,
+                    output_path=model_directory / "activation_stats.csv",
+                )
+            if pca_rows:
+                save_rows_csv(
+                    rows=[
+                        {
+                            key: value
+                            for key, value in pca_row.items()
+                            if key not in {"projection", "targets"}
+                        }
+                        for pca_row in pca_rows
+                    ],
+                    output_path=model_directory / "pca_metrics.csv",
+                )
+                plot_layer_pca(
+                    pca_rows=pca_rows,
+                    output_path=model_directory / "layer_pca.png",
+                )
+            save_rows_csv(
+                rows=[
+                    {
+                        "parameter_name": name,
+                        "parameter_norm": parameter_norm_values[name],
+                        "gradient_norm": gradient_norm_values[name],
+                    }
+                    for name in parameter_norm_values
+                ],
+                output_path=model_directory / "parameter_gradient_norms.csv",
+            )
+            np.savez_compressed(
+                model_directory / "input_gradient_grid.npz",
+                x=grid_x_1,
+                y=grid_x_2,
+                gradient_norm=grid_gradient_norms.numpy().reshape(
+                    args.grid_points,
+                    args.grid_points,
+                ),
             )
             plot_decision_boundary(
                 model=model,
@@ -525,6 +661,20 @@ def main() -> None:
                 ),
                 grid_limit=args.grid_limit,
                 grid_points=args.grid_points,
+            )
+            plot_input_gradient_norm(
+                grid_x_1=grid_x_1,
+                grid_x_2=grid_x_2,
+                gradient_norms=grid_gradient_norms,
+                x=x_test,
+                y=y_test,
+                title=(
+                    f"{condition.name} | seed={seed} | "
+                    "predicted-logit input sensitivity"
+                ),
+                output_path=(
+                    model_directory / "input_gradient_norm.png"
+                ),
             )
 
             print(
@@ -585,6 +735,31 @@ def main() -> None:
                 "full-batch optimization",
                 "evaluation grid",
             ],
+            "prediction_before_running": {
+                "behavior": (
+                    "The linear control should remain structurally mismatched; "
+                    "deeper nonlinear models should learn a curved boundary "
+                    "within the same step budget."
+                ),
+                "internal_diagnostics": (
+                    "If depth changes the learned geometry, the difference "
+                    "should also appear in layer activation separation, "
+                    "gradient scale, input sensitivity, or boundary "
+                    "transition density."
+                ),
+                "falsifying_observation": (
+                    "A depth advantage that disappears across seeds and "
+                    "does not change any diagnostic leaves the mechanism "
+                    "unresolved."
+                ),
+            },
+            "required_diagnostics": [
+                "activation statistics and ReLU zero fraction",
+                "parameter and final full-batch gradient norms",
+                "fixed-probe layer PCA",
+                "input gradient norm map",
+                "grid boundary complexity proxy",
+            ],
             "arguments": serialize_namespace(args),
             "model_conditions": [
                 asdict(condition)
@@ -593,6 +768,68 @@ def main() -> None:
             "summaries": summaries,
         },
         run_directory / "experiment_design_and_results.json",
+    )
+    observation_lines = [
+        "# Spiral depth comparison results",
+        "",
+        "## Prediction before running",
+        "",
+        "The linear control should remain structurally mismatched; deeper "
+        "nonlinear models were expected to learn a curved boundary within "
+        "the same step budget.",
+        "",
+        "## Observed seed aggregates",
+        "",
+        "| Model | Test accuracy | Test cross-entropy | Boundary complexity | Mean input gradient norm |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for summary in summaries:
+        observation_lines.append(
+            "| {model} | {accuracy:.4f} ± {accuracy_std:.4f} | "
+            "{loss:.4f} ± {loss_std:.4f} | {complexity:.4f} ± "
+            "{complexity_std:.4f} | {gradient:.4f} ± {gradient_std:.4f} |".format(
+                model=summary["model_name"],
+                accuracy=float(summary["test_accuracy_mean"]),
+                accuracy_std=float(summary["test_accuracy_std"]),
+                loss=float(summary["test_cross_entropy_mean"]),
+                loss_std=float(summary["test_cross_entropy_std"]),
+                complexity=float(summary["boundary_complexity_mean"]),
+                complexity_std=float(summary["boundary_complexity_std"]),
+                gradient=float(summary["mean_input_gradient_norm_mean"]),
+                gradient_std=float(summary["mean_input_gradient_norm_std"]),
+            )
+        )
+    observation_lines.extend(
+        [
+            "",
+            "## Interpretation guardrail",
+            "",
+            "These aggregates describe observations only. Use the boundary, "
+            "margin, activation, PCA and input-gradient figures to evaluate "
+            "competing explanations before making a mechanistic claim.",
+            "",
+        ]
+    )
+    (run_directory / "results_note.md").write_text(
+        "\n".join(observation_lines),
+        encoding="utf-8",
+    )
+    save_json(
+        {
+            "experiment": "spiral_depth_comparison",
+            "git_commit": git_commit,
+            "seed_values": args.seeds,
+            "output_files": [
+                "config.json",
+                "manifest.json",
+                "metrics.csv",
+                "training_history.csv",
+                "summary.csv",
+                "experiment_design_and_results.json",
+                "results_note.md",
+            ],
+        },
+        run_directory / "manifest.json",
     )
     plot_summary(
         summaries=summaries,
